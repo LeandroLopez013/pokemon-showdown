@@ -711,7 +711,7 @@ export class TeamValidator {
 			}
 		}
 		if ((this.gen === 9 && !dex.currentMod.startsWith('champions') && !ruleTable.has('terastalclause')) ||
-			ruleTable.has('bonustypemod')) {
+			ruleTable.has('bonustypemod') || ruleTable.has('soularmormod')) {
 			const type = dex.types.get(set.teraType || species.requiredTeraType || species.types[0]);
 			if (!type.exists || type.isNonstandard) {
 				problems.push(`${name}'s Terastal type (${set.teraType}) is invalid.`);

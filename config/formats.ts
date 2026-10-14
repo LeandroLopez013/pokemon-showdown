@@ -298,6 +298,14 @@ export const Formats: import('../sim/dex-formats').FormatList = [
 		ruleset: ['Flat Rules', 'VGC Timer', 'Force Open Team Sheets', 'Best of = 3'],
 	},
 	{
+		name: "[Gen 9 Champions] Soul Armor VGC",
+		desc: `Cada Pokémon lleva un alma (apodo "Especie-Stat" y Tera Type del alma). Presta un stat, suaviza debilidades y da pseudo-STAB. Todo pasivo. Se pierde al Mega Evolucionar.`,
+		mod: 'champions',
+		gameType: 'doubles',
+		bestOfDefault: true,
+		ruleset: ['Flat Rules', '!Nickname Clause', '!Species Clause', 'Soul Armor Mod', 'VGC Timer', 'Open Team Sheets'],
+	},
+	{
 		name: "[Gen 9 Champions] VGC 2026 Reg M-B",
 		mod: 'championsregmb',
 		gameType: 'doubles',

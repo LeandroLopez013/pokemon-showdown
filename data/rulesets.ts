@@ -2,6 +2,51 @@
 
 import type { Learnset } from "../sim/dex-species";
 
+const SOULARMOR_DEBUG = false; // ponlo en false al terminar de probar
+
+const SA_WEIGHT_SOUL = 0.3; // el 70% es el principal
+const SA_CAP_BASE = 40;
+const SA_CAP_SCALE = 50;
+const SA_RESIST = 0.875; // 2x -> 1.75x y 4x -> 3.5x
+const SA_STAB = 1.15;
+const SA_IMMUNITY_COUNTS_AS_RESIST = true;
+const SA_MAX_REPEATS = 2;
+
+function saLog(battle: any, msg: string) {
+	if (!SOULARMOR_DEBUG) return;
+	battle.add('-message', `[SA] ${msg}`);
+	console.log(`[SoulArmor] ${msg}`);
+}
+
+/**
+ * Parsea el alma: apodo "Especie-Stat" y tipo del alma en el Tera Type.
+ * Ej: apodo "Gardevoir-SpA" con Tera Type Fairy.
+ */
+function parseSoul(dex: any, set: PokemonSet) {
+	const m = /^(.+)-(atk|def|spa|spd|spe)$/i.exec(set.name || '');
+	if (!m) return null;
+	const soul = dex.species.get(m[1]);
+	if (!soul.exists) return null;
+	const stat = m[2].toLowerCase() as StatIDExceptHP;
+	const armorType = set.teraType ? dex.types.get(set.teraType).name : soul.types[0];
+	return { soul, stat, armorType };
+}
+
+/**
+ * Calcula la ganancia de stat según:
+ * - Promedio ponderado 70/30 (principal/alma).
+ * - Tope dinámico: SA_CAP_BASE / (1 + diff / SA_CAP_SCALE).
+ * - Stat final = min(promedio, principal + tope).
+ * - Si la ganancia es <= 0, devuelve 0 (el stat nunca baja).
+ */
+function soulGain(principal: number, soul: number) {
+	const diff = soul - principal;
+	if (diff <= 0) return 0;
+	const weighted = principal * (1 - SA_WEIGHT_SOUL) + soul * SA_WEIGHT_SOUL;
+	const cap = SA_CAP_BASE / (1 + diff / SA_CAP_SCALE);
+	return Math.floor(Math.min(weighted, principal + cap)) - principal;
+}
+
 // The list of formats is stored in config/formats.js
 export const Rulesets: import('../sim/dex-formats').FormatDataTable = {
 
@@ -3266,6 +3311,127 @@ export const Rulesets: import('../sim/dex-formats').FormatDataTable = {
 			}
 			const speciesMods = [...this.ruleTable.keys()].map(r => this.dex.data.Rulesets[r]).filter(r => r?.onModifySpecies);
 			if (!speciesMods.length) throw new Error('This format has no rules that modify base stats.');
+		},
+	},
+	soularmormod: {
+		effectType: 'Rule',
+		name: 'Soul Armor Mod',
+		desc: 'El apodo "Especie-Stat" y el Tera Type definen el alma. Presta un stat (ponderado 70/30 con tope dinámico), suaviza debilidades y da pseudo-STAB. Se pierde al Mega Evolucionar.',
+
+		onBegin() {
+			this.add('rule', 'Soul Armor Mod: cada Pokémon tiene un alma pasiva. Se pierde al Mega Evolucionar.');
+			for (const pokemon of this.getAllPokemon()) {
+				const parsed = parseSoul(this.dex, pokemon.set);
+				if (!parsed) continue;
+				pokemon.m.soul = parsed.soul.name;
+				pokemon.m.soulStat = parsed.stat;
+				pokemon.m.soulArmorType = parsed.armorType;
+				saLog(this, `${pokemon.name}: alma=${parsed.soul.name}, stat=${parsed.stat}, tipo=${parsed.armorType}`);
+			}
+		},
+
+		onSwitchIn(pokemon) {
+			if (!pokemon.m.soul) return;
+			const stat = pokemon.m.soulStat as StatIDExceptHP;
+			const orig = this.dex.species.get(pokemon.set.species).baseStats[stat];
+			const now = pokemon.species.baseStats[stat];
+			this.add('-start', pokemon, `Alma: ${pokemon.m.soul} (${stat}, ${pokemon.m.soulArmorType})`, '[silent]');
+			saLog(this, `${pokemon.name}: ${stat} base ${orig} -> ${now}`);
+		},
+
+		onAfterMega(pokemon) {
+			if (pokemon.m.soul) {
+				saLog(this, `${pokemon.name} Mega Evolucionó y pierde el alma de ${pokemon.m.soul}.`);
+				delete pokemon.m.soul;
+				delete pokemon.m.soulStat;
+				delete pokemon.m.soulArmorType;
+			}
+		},
+
+		// ---------- Validación ----------
+		// Va en onChangeSet porque antes de onValidateSet el validador completa el Tera Type por defecto.
+		onChangeSet(set) {
+			if (!set.teraType) {
+				return [`${set.species}: el Tera Type es obligatorio (es el tipo del alma).`];
+			}
+		},
+
+		onValidateSet(set) {
+			const species = this.dex.species.get(set.species);
+			const parsed = parseSoul(this.dex, set);
+			if (!parsed || parsed.soul.battleOnly || parsed.soul.isNonstandard) {
+				return [`${set.species}: el apodo debe ser "Especie-Stat", por ejemplo "Gardevoir-SpA" (Atk, Def, SpA, SpD o Spe), y el tipo del alma va en el Tera Type.`];
+			}
+			const { soul, armorType } = parsed;
+			if (this.ruleTable.isBannedSpecies(soul)) {
+				return [`${soul.name} no puede ser alma (prohibido por el formato).`];
+			}
+			if (soul.baseSpecies === species.baseSpecies) {
+				return [`${species.name} no puede ser su propia alma.`];
+			}
+			if (!soul.types.includes(armorType)) {
+				return [`${soul.name} no tiene el tipo ${armorType} (Tera Type). Tipos válidos: ${soul.types.join(', ')}.`];
+			}
+		},
+
+		onValidateTeam(team) {
+			// Cuenta cuántos Pokémon aparecen tanto como principal como alma.
+			const principals = team.map(s => this.dex.species.get(s.species).baseSpecies);
+			const souls = team
+				.map(s => parseSoul(this.dex, s)?.soul.baseSpecies)
+				.filter(Boolean) as string[];
+			const both = principals.filter(p => souls.includes(p));
+			const uniqueBoth = new Set(both);
+			if (uniqueBoth.size > SA_MAX_REPEATS) {
+				return [`Solo ${SA_MAX_REPEATS} Pokémon pueden estar como principal y alma. Actualmente: ${Array.from(uniqueBoth).join(', ')}.`];
+			}
+		},
+
+		// ---------- Stat prestado ----------
+		onModifySpecies(species, target, source, effect) {
+			if (!target || species.isMega) return;
+			if (effect && ['imposter', 'transform'].includes(effect.id)) return;
+			const parsed = parseSoul(this.dex, target.set);
+			if (!parsed || parsed.soul.baseSpecies === species.baseSpecies) return;
+			const { soul, stat } = parsed;
+			const gain = soulGain(species.baseStats[stat], soul.baseStats[stat]);
+			if (!gain) return;
+			const newSpecies = this.dex.deepClone(species);
+			newSpecies.baseStats[stat] += gain;
+			newSpecies.bst += gain;
+			return newSpecies;
+		},
+
+		// ---------- Pseudo-resistencia y pseudo-STAB ----------
+		onModifyDamage(damage, source, target, move) {
+			if (!move || move.category === 'Status') return;
+			let mod = 1;
+
+			// Pseudo-resistencia: solo si el golpe ya es súper efectivo contra el principal.
+			if (target?.m.soul && !target.species.isMega && target.getMoveHitData(move).typeMod > 0) {
+				const armorType = target.m.soulArmorType;
+				const own = target.species.types;
+				if (!own.includes(armorType)) { // tipos en común se ignoran
+					const immune = !this.dex.getImmunity(move, armorType);
+					const eff = this.dex.getEffectiveness(move, armorType);
+					if (eff < 0 || (immune && SA_IMMUNITY_COUNTS_AS_RESIST)) {
+						mod *= SA_RESIST;
+						saLog(this, `Suavizado: ${move.name} (${move.type}) contra ${target.name} x${SA_RESIST}`);
+					}
+				}
+			}
+
+			// Pseudo-STAB: solo si el principal no tiene STAB con ese tipo.
+			if (source?.m.soul && !source.species.isMega && move.type !== '???') {
+				const armorType = source.m.soulArmorType;
+				if (move.type === armorType && !source.hasType(move.type)) {
+					mod *= SA_STAB;
+					saLog(this, `Pseudo-STAB: ${source.name} usa ${move.name} (${move.type}) x${SA_STAB}`);
+				}
+			}
+
+			if (mod === 1) return;
+			return this.chainModify(mod);
 		},
 	},
 };

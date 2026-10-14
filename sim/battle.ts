@@ -3185,7 +3185,7 @@ export class Battle {
 			const team = side.pokemon.map(pokemon => {
 				const set = pokemon.set;
 				const newSet: PokemonSet = {
-					name: '',
+					name: this.ruleTable.has('soularmormod') ? set.name : '',
 					species: set.species,
 					item: set.item,
 					ability: set.ability,
